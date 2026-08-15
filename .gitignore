@@ -1,0 +1,27 @@
+# Python environment & cache
+venv/
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+
+# Media Cache (Ignore all audio and bill formats)
+static/audio_cache/*.ogg
+static/audio_cache/*.mp3
+static/audio_cache/*.wav
+static/audio_cache/*.m4a
+
+static/sample_bills/*.jpg
+static/sample_bills/*.jpeg
+static/sample_bills/*.png
+static/sample_bills/*.webp
+static/sample_bills/*.pdf
+
+# Keep empty folder structures tracked in Git
+!static/audio_cache/.gitkeep
+!static/sample_bills/.gitkeep
+
+# System/IDE artifacts
+.vscode/
+.DS_Store

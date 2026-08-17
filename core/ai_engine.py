@@ -6,31 +6,25 @@ from config.settings import GEMINI_API_KEY
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = """
-You are ShopPilot AI, an intelligent retail assistant for local shopkeepers across India.
-Shopkeepers may text with broken grammar, phonetic spelling, mixed languages, or local dialects:
-- English / Broken English (e.g. 'tomato sold', 'give 2 parle g', 'sold marie gold')
-- Tamil / Tanglish (e.g. 'thakkali vutthen', '2 good day kuduthen', 'stock enna irukku?')
-- Hindi / Hinglish (e.g. 'tamatar bik gaya', '2 maggi becha', 'kitna stock hai?')
-- Telugu, Kannada, Malayalam, etc.
+You are ShopPilot AI, a retail assistant for local shopkeepers across India.
+Shopkeepers may speak or write casually, with poor grammar, or in regional languages (Tamil, Hindi, Telugu, Kannada, Malayalam, English).
 
-Your Tasks:
-1. Detect user's language/dialect ('ta', 'ta-Latn' (Tanglish), 'hi', 'hi-Latn' (Hinglish), 'en', etc.).
+Rules:
+1. Detect user's primary regional language code ('ta' for Tamil, 'hi' for Hindi, 'te' for Telugu, 'kn' for Kannada, 'ml' for Malayalam, 'en' for English).
 2. Extract intent:
-   - LOG_SALE: Sold items. If quantity is omitted (e.g. 'tomato sold'), default quantity to 1.
-   - CONFIRM_ORDER: Confirmation (e.g. 'yes', 'aama', 'haan', 'sari', 'order pannu').
-   - QUERY_STOCK: Inquiring about inventory.
-   - OTHER: Greetings, unclear text, or small talk.
-3. Normalize item names to standard catalog names if possible (e.g. 'thakkali'/'tamatar' -> 'Tomato', 'good day' -> 'Good Day').
-4. Formulate a short, natural response in the EXACT language and script/style the user used.
+   - LOG_SALE: Sold goods. If quantity is omitted, default quantity to 1.
+   - CONFIRM_ORDER: Restock confirmation (e.g., 'yes', 'confirm', 'aama', 'haan', 'sari').
+   - QUERY_STOCK: Asking about current inventory.
+   - OTHER: General greeting/fallback.
+3. Map item names to standard inventory names (e.g., 'thakkali' -> 'Tomato', 'good day' -> 'Good Day').
 
 Output strictly valid JSON matching this schema:
 {
-  "detected_language": "string",
+  "detected_language": "ta" | "hi" | "te" | "kn" | "ml" | "en",
   "intent": "LOG_SALE" | "CONFIRM_ORDER" | "QUERY_STOCK" | "OTHER",
   "items": [
     {"item_name": "string", "quantity": integer}
-  ],
-  "localized_fallback_message": "string"
+  ]
 }
 """
 
@@ -42,31 +36,27 @@ def extract_retail_intent(user_input: str) -> dict:
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 response_mime_type="application/json",
-                temperature=0.2
+                temperature=0.1
             )
         )
         return json.loads(response.text)
     except Exception as e:
-        print(f"Gemini Extraction Error: {e}")
-        return {
-            "detected_language": "en",
-            "intent": "OTHER",
-            "items": [],
-            "localized_fallback_message": "Could not understand the message. Please try again."
-        }
+        print(f"Gemini Intent Error: {e}")
+        return {"detected_language": "en", "intent": "OTHER", "items": []}
 
-def generate_localized_reply(context_data: dict, detected_lang: str) -> str:
+def generate_localized_reply(context_data: dict, target_lang: str) -> str:
     """
-    Translates inventory updates or stock alerts dynamically into the user's language/dialect.
+    Generates pure native-script text for voice conversion (NO Latin Tanglish/Hinglish).
     """
     prompt = f"""
     Context Data: {json.dumps(context_data, ensure_ascii=False)}
-    Target Language / Dialect: {detected_lang}
+    Target Language Code: {target_lang} (e.g. 'ta' = Tamil script, 'hi' = Devanagari script, 'en' = English).
 
-    Create a clean, friendly WhatsApp message in the target language based on the context data.
-    - If it's a sales confirmation: state item deducted and remaining stock.
-    - If low stock: warn them clearly and ask to reply 'YES' to order from the distributor.
-    - Keep formatting clean with emojis. Use the native script or Latin script depending on the target language style.
+    Generate a brief, clear, natural response in the PURE NATIVE SCRIPT of the target language.
+    STRICT RULE: Do NOT use Latinized Tanglish or Hinglish. If Tamil, write purely in தமிழ். If Hindi, write purely in हिन्दी.
+    - If sales logged: mention item name and remaining stock.
+    - If low stock: alert them and tell them to say 'YES' to order from distributor.
+    - Do NOT include emojis in text that will be spoken aloud.
     """
     try:
         res = ai_client.models.generate_content(
@@ -74,6 +64,6 @@ def generate_localized_reply(context_data: dict, detected_lang: str) -> str:
             contents=prompt
         )
         return res.text.strip()
-    except Exception:
-        # Fallback to English summary
-        return context_data.get("default_english_text", "Update completed.")
+    except Exception as e:
+        print(f"Localization Error: {e}")
+        return "Update completed."

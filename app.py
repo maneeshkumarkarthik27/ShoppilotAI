@@ -1,7 +1,8 @@
-from flask import Flask, request
+import os
+from flask import Flask, request, send_from_directory
 from twilio.twiml.messaging_response import MessagingResponse
 from core.ai_engine import extract_retail_intent, generate_localized_reply
-from core.voice_processor import transcribe_whatsapp_audio
+from core.voice_processor import transcribe_whatsapp_audio, text_to_audio_file
 from database.db import (
     get_all_inventory,
     deduct_stock_and_log_sale,
@@ -11,7 +12,11 @@ from database.db import (
 )
 from services.whatsapp_service import send_distributor_purchase_order
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
+
+@app.route("/static/audio/<filename>")
+def serve_audio(filename):
+    return send_from_directory(os.path.join(app.root_path, "static", "audio"), filename)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -19,27 +24,32 @@ def webhook():
     num_media = int(request.values.get("NumMedia", 0))
     media_url = request.values.get("MediaUrl0", "")
 
-    if not incoming_msg and num_media == 0:
-        return ("", 204)
+    is_voice_input = num_media > 0 and media_url
 
-    # 1. Voice transcription if audio sent
-    if num_media > 0 and media_url:
+    if is_voice_input:
+        print("🎙️ Audio note received, transcribing...")
         incoming_msg = transcribe_whatsapp_audio(media_url)
+        print(f"Transcribed Text: {incoming_msg}")
+
+    if not incoming_msg and not is_voice_input:
+        return ("", 204)
 
     resp = MessagingResponse()
     reply = resp.message()
 
     if not incoming_msg:
-        reply.body("Could not process voice. Please try again.")
+        reply.body("குரலை அடையாளம் காண முடியவில்லை. மீண்டும் முயற்சிக்கவும்.")
         return str(resp)
 
-    # 2. Extract Intent & Detect Language
+    # 1. Parse Intent & Regional Language
     parsed = extract_retail_intent(incoming_msg)
     intent = parsed.get("intent", "OTHER")
     items = parsed.get("items", [])
-    lang = parsed.get("detected_language", "en")
+    lang = parsed.get("detected_language", "ta")  # Default to Tamil
 
-    # 3. Handle Sales Logging
+    reply_text = ""
+
+    # 2. Process Intent
     if intent == "LOG_SALE" and items:
         processed_items = []
         critical_alerts = []
@@ -53,7 +63,7 @@ def webhook():
                 if res["is_low_stock"]:
                     critical_alerts.append(res)
             else:
-                processed_items.append({"name": name, "deducted": qty, "status": "Not found in DB"})
+                processed_items.append({"name": name, "deducted": qty, "status": "Not found"})
 
         draft_summary = ""
         if critical_alerts:
@@ -70,45 +80,47 @@ def webhook():
             "critical_alert": bool(critical_alerts),
             "order_draft": draft_summary
         }
-        
-        reply_message = generate_localized_reply(context_data, lang)
-        reply.body(reply_message)
+        reply_text = generate_localized_reply(context_data, lang)
 
-    # 4. Handle Restock Confirmation
     elif intent == "CONFIRM_ORDER":
         pending_order = get_latest_draft_order()
         if pending_order:
             order_text = pending_order.get("order_details", {}).get("summary", "Restock Order")
             dist_phone = pending_order.get("distributors", {}).get("phone_number")
-
             mark_order_as_dispatched(pending_order["id"])
             send_distributor_purchase_order(order_text, dist_phone)
 
             context_data = {
                 "type": "ORDER_DISPATCHED",
-                "order_summary": order_text,
-                "message": "Purchase order has been sent to the distributor."
+                "order_summary": order_text
             }
-            reply_message = generate_localized_reply(context_data, lang)
-            reply.body(reply_message)
+            reply_text = generate_localized_reply(context_data, lang)
         else:
-            reply.body("No pending draft orders found.")
+            reply_text = "நிலுவையில் உள்ள ஆர்டர்கள் எதுவும் இல்லை." if lang == "ta" else "No pending draft orders found."
 
-    # 5. Handle Inventory Query
     elif intent == "QUERY_STOCK":
         inventory_items = get_all_inventory()
         context_data = {
             "type": "STOCK_QUERY",
-            "inventory": [{"name": i["name"], "stock": i["current_stock"], "threshold": i["threshold"]} for i in inventory_items]
+            "inventory": [{"name": i["name"], "stock": i["current_stock"]} for i in inventory_items]
         }
-        reply_message = generate_localized_reply(context_data, lang)
-        reply.body(reply_message)
+        reply_text = generate_localized_reply(context_data, lang)
 
-    # 6. Fallback
     else:
-        fallback = parsed.get("localized_fallback_message", "Hello! How can I assist you with your shop inventory?")
-        reply.body(fallback)
+        context_data = {"type": "GREETING", "text": "Help with sales logging, stock query, or distributor orders."}
+        reply_text = generate_localized_reply(context_data, lang)
 
+    # 3. If the user sent a voice message, reply with a Native Audio Note
+    if is_voice_input:
+        audio_filename = text_to_audio_file(reply_text, lang)
+        if audio_filename:
+            # Ngrok public base URL
+            base_url = request.host_url.rstrip("/")
+            audio_url = f"{base_url}/static/audio/{audio_filename}"
+            reply.media(audio_url)
+
+    # Attach text response
+    reply.body(reply_text)
     return str(resp)
 
 if __name__ == "__main__":
